@@ -20,3 +20,7 @@ class ReplayMemory:
 
     def __len__(self):
         return len(self.buffer)
+    
+    def empty(self):
+        self.buffer = []
+        self.position = 0
