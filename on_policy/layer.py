@@ -1,5 +1,6 @@
 from scipy.special import softmax
 import numpy as np
+import matplotlib.pyplot as plt
 
 from unit import Unit
 
@@ -76,3 +77,24 @@ class Layer(object):
     def clear_stats(self):
         for unit in self.units:
             unit.clear_stats()
+    
+    def plot_stats(self, n=1000):
+        def moving_average(a) :
+            ret = np.cumsum(a, dtype=float)
+            ret[n:] = ret[n:] - ret[:-n]
+            return ret[n - 1:] / n
+        for j, u in enumerate(self.units):
+            plt.plot(list(range(len(u.action_losses)))[:1-n], moving_average(u.action_losses), label='Unit %d' % (j + 1))
+        plt.title('Action loss')
+        plt.legend()
+        plt.show()
+        for j, u in enumerate(self.units):
+            plt.plot(list(range(len(u.value_losses)))[:1-n], moving_average(u.value_losses), label='Unit %d' % (j + 1))
+        plt.title('Value loss')
+        plt.legend()
+        plt.show()
+        for j, u in enumerate(self.units):
+            plt.plot(list(range(len(u.dist_entropies)))[:1-n], moving_average(u.dist_entropies), label='Unit %d' % (j + 1))
+        plt.title('Dist entropies')
+        plt.legend()
+        plt.show()
