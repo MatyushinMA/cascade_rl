@@ -55,7 +55,7 @@ class RolloutStorage(object):
         self.masks[self.step + 1].copy_(masks)
         self.bad_masks[self.step + 1].copy_(bad_masks)
 
-        self.step = (self.step + 1) % self.num_steps
+        self.step = self.step + 1
 
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
@@ -109,7 +109,9 @@ class RolloutStorage(object):
                                num_mini_batch=None,
                                mini_batch_size=None):
         num_steps, num_processes = self.rewards.size()[0:2]
+        num_steps = self.step
         batch_size = num_processes * num_steps
+        num_mini_batch = min(num_mini_batch, batch_size)
 
         if mini_batch_size is None:
             assert batch_size >= num_mini_batch, (

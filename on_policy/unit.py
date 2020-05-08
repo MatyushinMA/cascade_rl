@@ -13,19 +13,19 @@ class Unit(object):
         self.actor_critic = Policy((self.num_inputs,), self.action_space, base_kwargs={'recurrent' : False})
         if not args:
             class args(object):
-                eval_interval = None
                 log_interval = 10
                 use_gae = False
-                num_env_steps = 10e6
+                num_updates = 1e5
                 num_steps = 32
+                memory_capacity = 32
                 clip_param = 0.2
                 ppo_epoch = 4
-                num_mini_batch = 32
+                num_mini_batch = 64
                 value_loss_coef = 0.5
                 entropy_coef = 0.01
-                lr = 7e-4
+                lr = 1e-4
                 eps = 1e-5
-                max_grad_norm = 0.5
+                max_grad_norm = 0.2
                 gamma = 0.99
                 gae_lambda = 0.95
                 use_proper_time_limits = False
@@ -40,7 +40,7 @@ class Unit(object):
             lr=self.args.lr,
             eps=self.args.eps,
             max_grad_norm=self.args.max_grad_norm)
-        self.memory = RolloutStorage(self.args.num_steps, 1,
+        self.memory = RolloutStorage(self.args.memory_capacity, 1,
                                      (self.num_inputs,), self.action_space,
                                      self.actor_critic.recurrent_hidden_state_size)
         self.value_losses = []
@@ -85,7 +85,7 @@ class Unit(object):
         self.memory.after_update()
     
     def clear_memory(self):
-        self.memory = RolloutStorage(self.args.num_steps, 1,
+        self.memory = RolloutStorage(self.args.memory_capacity, 1,
                                      (self.num_inputs,), self.action_space,
                                      self.actor_critic.recurrent_hidden_state_size)
     
