@@ -1,9 +1,81 @@
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
+import numpy as np
 
 
 def _flatten_helper(T, N, _tensor):
     return _tensor.view(T * N, *_tensor.size()[2:])
+
+class ExtendableStorage(object):
+    def __init__(self):
+        self.clear()
+    
+    def insert(self, obs, action, action_log_prob, value_pred, unit_id=0, reward=0):
+        self.obs.append(obs)
+        self.actions.append(action)
+        self.action_log_probs.append(action_log_prob)
+        self.value_preds.append(value_pred)
+        self.rewards.append(reward)
+        self.unit_ids.append(unit_id)
+    
+    def has_enough_for_unit(self, unit_id):
+        return len(np.where(np.array(self.unit_ids) == unit_id)[0]) > 2
+    
+    def reward(self, reward):
+        self.rewards[-1] += reward
+    
+    def clear(self):
+        self.obs = []
+        self.rewards = []
+        self.value_preds = []
+        self.returns = []
+        self.action_log_probs = []
+        self.actions = []
+        self.unit_ids = []
+        self.done_marks = []
+        self.discount_marks = []
+    
+    def done(self):
+        self.done_marks.append(len(self.rewards))
+    
+    def discount(self):
+        self.discount_marks.append(len(self.rewards))
+    
+    def compute_returns(self, next_value, gamma):
+        self.returns = [next_value[0]]
+        for i, r in enumerate(self.rewards[::-1]):
+            _gamma = 1
+            if len(self.rewards) - i in self.discount_marks:
+                _gamma = gamma
+            self.returns.append(self.returns[i]*torch.Tensor([_gamma]).float()*\
+                                torch.Tensor([int((len(self.rewards) - i) not in self.done_marks)]) +\
+                                torch.Tensor([r]).float())
+        self.returns = torch.stack(self.returns[::-1])
+        self.value_preds += [torch.Tensor([[0]]).float()]
+        self.value_preds = torch.stack(self.value_preds).view(-1, 1)
+    
+    def feed_forward_generator(self, advantages, unit_id=0, num_mini_batch=None, mini_batch_size=None):
+        unit_mask = np.where(np.array(self.unit_ids) == unit_id)
+        batch_size = len(unit_mask[0])
+        if not mini_batch_size:
+            mini_batch_size = batch_size // num_mini_batch
+        sampler = BatchSampler(
+            SubsetRandomSampler(range(batch_size)),
+            mini_batch_size,
+            drop_last=False)
+        for indices in sampler:
+            obs_batch = torch.stack(self.obs).view(-1, *self.obs[0].shape)[unit_mask][indices]
+            actions_batch = torch.stack(self.actions).view(-1, self.actions[0].shape[0])[unit_mask][indices]
+            value_preds_batch = self.value_preds[:-1][unit_mask][indices]
+            return_batch = self.returns[:-1][unit_mask][indices]
+            old_action_log_probs_batch = torch.stack(self.action_log_probs).view(-1, 1)[unit_mask][indices]
+            if advantages is None:
+                adv_targ = None
+            else:
+                adv_targ = advantages.view(-1, 1)[unit_mask][indices]
+
+            yield obs_batch, None, actions_batch, \
+                value_preds_batch, return_batch, None, old_action_log_probs_batch, adv_targ
 
 
 class RolloutStorage(object):
@@ -71,7 +143,7 @@ class RolloutStorage(object):
                         use_proper_time_limits=True):
         if use_proper_time_limits:
             if use_gae:
-                self.value_preds[-1] = next_value
+                self.value_preds[self.step] = next_value
                 gae = 0
                 for step in reversed(range(self.rewards.size(0))):
                     delta = self.rewards[step] + gamma * self.value_preds[
@@ -82,14 +154,14 @@ class RolloutStorage(object):
                     gae = gae * self.bad_masks[step + 1]
                     self.returns[step] = gae + self.value_preds[step]
             else:
-                self.returns[-1] = next_value
+                self.returns[self.step] = next_value
                 for step in reversed(range(self.rewards.size(0))):
                     self.returns[step] = (self.returns[step + 1] * \
                         gamma * self.masks[step + 1] + self.rewards[step]) * self.bad_masks[step + 1] \
                         + (1 - self.bad_masks[step + 1]) * self.value_preds[step]
         else:
             if use_gae:
-                self.value_preds[-1] = next_value
+                self.value_preds[self.step] = next_value
                 gae = 0
                 for step in reversed(range(self.rewards.size(0))):
                     delta = self.rewards[step] + gamma * self.value_preds[
@@ -99,8 +171,8 @@ class RolloutStorage(object):
                                                                   1] * gae
                     self.returns[step] = gae + self.value_preds[step]
             else:
-                self.returns[-1] = next_value
-                for step in reversed(range(self.rewards.size(0))):
+                self.returns[self.step] = next_value
+                for step in reversed(range(self.step)):
                     self.returns[step] = self.returns[step + 1] * \
                         gamma * self.masks[step + 1] + self.rewards[step]
 
@@ -121,6 +193,7 @@ class RolloutStorage(object):
                 "".format(num_processes, num_steps, num_processes * num_steps,
                           num_mini_batch))
             mini_batch_size = batch_size // num_mini_batch
+        print(mini_batch_size)
         sampler = BatchSampler(
             SubsetRandomSampler(range(batch_size)),
             mini_batch_size,

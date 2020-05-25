@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from a2c_ppo_acktr.distributions import Bernoulli, Categorical, DiagGaussian
+from a2c_ppo_acktr.distributions import Bernoulli, Categorical, DiagGaussianRestricted
 from a2c_ppo_acktr.utils import init
 
 
@@ -32,7 +32,7 @@ class Policy(nn.Module):
             self.dist = Categorical(self.base.output_size, num_outputs)
         elif action_space.__class__.__name__ == "Box":
             num_outputs = action_space.shape[0]
-            self.dist = DiagGaussian(self.base.output_size, num_outputs)
+            self.dist = DiagGaussianRestricted(self.base.output_size, num_outputs, low=action_space.low, high=action_space.high)
         elif action_space.__class__.__name__ == "MultiBinary":
             num_outputs = action_space.shape[0]
             self.dist = Bernoulli(self.base.output_size, num_outputs)
@@ -72,8 +72,10 @@ class Policy(nn.Module):
     def evaluate_actions(self, inputs, rnn_hxs, masks, action):
         value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
         dist = self.dist(actor_features)
-
-        action_log_probs = dist.log_probs(action)
+        if action[0][0] in [0, 1] and action[0][1] in [0, 1] and action[0][2] in [0, 1]:
+            action_log_probs = dist.log_probs(action[:, 0].view(-1, 1))
+        else:
+            action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
         return value, action_log_probs, dist_entropy, rnn_hxs
@@ -194,9 +196,29 @@ class CNNBase(NNBase):
 
         return self.critic_linear(x), x, rnn_hxs
 
+class UniversalCritic(nn.Module):
+    def __init__(self, postwidth, bandwidth, hidden_size=64):
+        super(UniversalCritic, self).__init__()
+        
+        self.postwidth = postwidth
+        self.bandwidth = bandwidth
+        
+        init_ = lambda m: init(m, nn.init.orthogonal_, lambda x: nn.init.
+                               constant_(x, 0), np.sqrt(2))
+        
+        self.critic = nn.Sequential(init_(nn.Linear(self.postwidth*2 + self.bandwidth, hidden_size)), nn.Tanh(),
+                                    init_(nn.Linear(hidden_size, hidden_size)), nn.Tanh())
+        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+        
+        self.train()
+    
+    def forward(self, at_postcode, from_postcode, msg):
+        x = torch.cat((at_postcode, from_postcode, msg), dim=1)
+        return self.critic_linear(self.critic(x))
+        
 
 class MLPBase(NNBase):
-    def __init__(self, num_inputs, recurrent=False, hidden_size=64):
+    def __init__(self, num_inputs, recurrent=False, hidden_size=64, critic=None, postcode=None):
         super(MLPBase, self).__init__(recurrent, num_inputs, hidden_size)
 
         if recurrent:
@@ -208,12 +230,21 @@ class MLPBase(NNBase):
         self.actor = nn.Sequential(
             init_(nn.Linear(num_inputs, hidden_size)), nn.Tanh(),
             init_(nn.Linear(hidden_size, hidden_size)), nn.Tanh())
+        
+        if postcode is not None:
+            self.postcode = torch.from_numpy(postcode).float().view(1, -1)
+        else:
+            self.postcode = None
+        
+        if critic:
+            self.critic = critic
+            self.critic_linear = nn.Identity()
+        else:
+            self.critic = nn.Sequential(
+                init_(nn.Linear(num_inputs, hidden_size)), nn.Tanh(),
+                init_(nn.Linear(hidden_size, hidden_size)), nn.Tanh())
 
-        self.critic = nn.Sequential(
-            init_(nn.Linear(num_inputs, hidden_size)), nn.Tanh(),
-            init_(nn.Linear(hidden_size, hidden_size)), nn.Tanh())
-
-        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+            self.critic_linear = init_(nn.Linear(hidden_size, 1))
 
         self.train()
 
@@ -222,8 +253,19 @@ class MLPBase(NNBase):
 
         if self.is_recurrent:
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
-
-        hidden_critic = self.critic(x)
-        hidden_actor = self.actor(x)
+        if self.postcode is not None:
+            if x.shape[1] == 1:
+                from_postcode = torch.zeros((x.shape[0], self.critic.postwidth)).float()
+                msg = x.expand(-1, self.critic.bandwidth)
+            else:
+                from_postcode = x[:, :self.critic.postwidth]
+                msg = x[:, self.critic.postwidth:]
+            hidden_critic = self.critic(self.postcode.expand(x.shape[0], -1), from_postcode, msg)
+        else:
+            hidden_critic = self.critic(x)
+        if x[0][0] == 0.0 and x[0][1] == 0.0 and x[0][2] == 0.0:
+            hidden_actor = self.actor(x[:, 3].view(-1, 1))
+        else:
+            hidden_actor = self.actor(x)
 
         return self.critic_linear(hidden_critic), hidden_actor, rnn_hxs

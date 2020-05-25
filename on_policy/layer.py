@@ -58,17 +58,24 @@ class Layer(object):
             return unit_actions
     
     def reward(self, reward):
-        for flag, unit in zip(self.activate_map, self.units):
+        """for flag, unit in zip(self.activate_map, self.units):
             if flag:
-                unit.reward(reward)
+                unit.reward(reward)"""
+        for unit in self.units:
+            unit.reward(reward)
     
     def done(self):
         for unit in self.units:
             unit.done()
+        
+    def reset(self):
+        for unit in self.units:
+            unit.reset()
     
     def update(self):
         for unit in self.units:
-            unit.update()
+            if unit.memory.step > 2:
+                unit.update()
     
     def clear_memory(self):
         for unit in self.units:
@@ -94,7 +101,13 @@ class Layer(object):
         plt.legend()
         plt.show()
         for j, u in enumerate(self.units):
+            plt.plot(list(range(len(u.rewards)))[:1-n], moving_average(u.rewards), label='Unit %d' % (j + 1))
+        plt.title('Rewards')
+        plt.legend()
+        plt.show()
+        for j, u in enumerate(self.units):
             plt.plot(list(range(len(u.dist_entropies)))[:1-n], moving_average(u.dist_entropies), label='Unit %d' % (j + 1))
         plt.title('Dist entropies')
         plt.legend()
         plt.show()
+        
