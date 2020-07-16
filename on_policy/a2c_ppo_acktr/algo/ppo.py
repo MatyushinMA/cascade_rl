@@ -9,9 +9,9 @@ class PPO():
                  actor_critic,
                  clip_param,
                  ppo_epoch,
-                 num_mini_batch,
                  value_loss_coef,
                  entropy_coef,
+                 direction_loss_coef,
                  lr=None,
                  eps=None,
                  max_grad_norm=None,
@@ -21,30 +21,37 @@ class PPO():
 
         self.clip_param = clip_param
         self.ppo_epoch = ppo_epoch
-        self.num_mini_batch = num_mini_batch
 
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
+        self.direction_loss_coef = direction_loss_coef
 
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
 
         self.optimizer = optim.Adam(actor_critic.parameters(), lr=lr, eps=eps)
     
-    def _update(self, generator):
+    def _update(self, generator, postwidth=0):
         value_loss_epoch = 0
         action_loss_epoch = 0
         dist_entropy_epoch = 0
+        direction_loss_epoch = 0
         cnt = 0
         
         for sample in generator:
-            obs_batch, recurrent_hidden_states_batch, actions_batch, \
-                       value_preds_batch, return_batch, masks_batch, old_action_log_probs_batch, \
-                            adv_targ = sample
+            obs_batch, \
+            actions_batch, \
+            value_preds_batch, \
+            return_batch, \
+            old_action_log_probs_batch, \
+            adv_targ, \
+            target_pcs = sample
 
-            values, action_log_probs, dist_entropy, _ = self.actor_critic.evaluate_actions(
-                        obs_batch, recurrent_hidden_states_batch, masks_batch,
-                        actions_batch)
+            values, \
+            action_log_probs, \
+            dist_entropy, \
+            dist_mode = self.actor_critic.evaluate_actions(obs_batch, actions_batch)
+            dist_mode = dist_mode.view(actions_batch.shape)
 
             ratio = torch.exp(action_log_probs -
                                       old_action_log_probs_batch)
@@ -52,6 +59,13 @@ class PPO():
             surr2 = torch.clamp(ratio, 1.0 - self.clip_param,
                                 1.0 + self.clip_param) * adv_targ
             action_loss = -torch.min(surr1, surr2).mean()
+            direction_loss = torch.Tensor([0]).float()
+            if len(target_pcs) > 2:
+                print(len(target_pcs))
+            for i, target_pc in enumerate(target_pcs):
+                if target_pc is None:
+                    continue
+                direction_loss += adv_targ * ((dist_mode[i, 1:postwidth+1] - target_pc)**2).mean()
             if self.use_clipped_value_loss:
                 value_pred_clipped = value_preds_batch + \
                     (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
@@ -65,20 +79,25 @@ class PPO():
                 
 
             self.optimizer.zero_grad()
-            loss = value_loss * self.value_loss_coef + action_loss - dist_entropy * self.entropy_coef
+            loss = value_loss * self.value_loss_coef + \
+                   action_loss + \
+                   direction_loss * self.direction_loss_coef - \
+                   dist_entropy * self.entropy_coef
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
             value_loss_epoch += value_loss.item()
             action_loss_epoch += action_loss.item()
             dist_entropy_epoch += dist_entropy.item()
+            direction_loss_epoch += direction_loss.item()
             cnt += 1
         
         value_loss_epoch /= cnt
         action_loss_epoch /= cnt
         dist_entropy_epoch /= cnt
+        direction_loss_epoch /= cnt
 
-        return value_loss_epoch, action_loss_epoch, dist_entropy_epoch
+        return value_loss_epoch, action_loss_epoch, dist_entropy_epoch, direction_loss_epoch
 
     def update(self, rollouts):
         advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
@@ -90,12 +109,7 @@ class PPO():
         dist_entropy_epoch = 0
 
         for e in range(self.ppo_epoch):
-            if self.actor_critic.is_recurrent:
-                data_generator = rollouts.recurrent_generator(
-                    advantages, self.num_mini_batch)
-            else:
-                data_generator = rollouts.feed_forward_generator(
-                    advantages, self.num_mini_batch)
+            data_generator = rollouts.feed_forward_generator(advantages)
 
             value_loss, action_loss, dist_entropy = self._update(data_generator)
             value_loss_epoch += value_loss

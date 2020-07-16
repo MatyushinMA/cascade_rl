@@ -1,10 +1,10 @@
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import numpy as np
-
+import numpy.random as npr
 
 def _flatten_helper(T, N, _tensor):
-    return _tensor.view(T * N, *_tensor.size()[2:])
+    return _tensor.view(T * N, *_tensor.size()[2:])        
 
 class ExtendableStorage(object):
     def __init__(self):
@@ -18,7 +18,7 @@ class ExtendableStorage(object):
         self.rewards.append(reward)
         self.unit_ids.append(unit_id)
     
-    def has_enough_for_unit(self, unit_id):
+    def has_enough_for(self, unit_id):
         return len(np.where(np.array(self.unit_ids) == unit_id)[0]) > 2
     
     def reward(self, reward):
@@ -42,7 +42,7 @@ class ExtendableStorage(object):
         self.discount_marks.append(len(self.rewards))
     
     def compute_returns(self, next_value, gamma):
-        self.returns = [next_value[0]]
+        self.returns = [next_value]
         for i, r in enumerate(self.rewards[::-1]):
             _gamma = 1
             if len(self.rewards) - i in self.discount_marks:
@@ -51,7 +51,7 @@ class ExtendableStorage(object):
                                 torch.Tensor([int((len(self.rewards) - i) not in self.done_marks)]) +\
                                 torch.Tensor([r]).float())
         self.returns = torch.stack(self.returns[::-1])
-        self.value_preds += [torch.Tensor([[0]]).float()]
+        self.value_preds += [torch.Tensor([0]).float()]
         self.value_preds = torch.stack(self.value_preds).view(-1, 1)
     
     def feed_forward_generator(self, advantages, unit_id=0, num_mini_batch=None, mini_batch_size=None):
@@ -69,14 +69,47 @@ class ExtendableStorage(object):
             value_preds_batch = self.value_preds[:-1][unit_mask][indices]
             return_batch = self.returns[:-1][unit_mask][indices]
             old_action_log_probs_batch = torch.stack(self.action_log_probs).view(-1, 1)[unit_mask][indices]
-            if advantages is None:
-                adv_targ = None
-            else:
-                adv_targ = advantages.view(-1, 1)[unit_mask][indices]
+            adv_targ = advantages.view(-1, 1)[unit_mask][indices]
 
             yield obs_batch, None, actions_batch, \
                 value_preds_batch, return_batch, None, old_action_log_probs_batch, adv_targ
 
+class ExtendableTransformerStorage(ExtendableStorage):
+    def has_enough_for(self, unit_id):
+        return len(np.where(np.array(self.unit_ids) == unit_id)[0]) > 0
+    
+    def feed_forward_generator(self, advantages, unit_id=0):
+        indices = np.where(np.array(self.unit_ids) == unit_id)[0]
+        npr.shuffle(indices)
+        for index in indices:
+            obs = self.obs[index]
+            action = self.actions[index]
+            value_pred = self.value_preds[index]
+            ret = self.returns[index]
+            old_action_log_prob = self.action_log_probs[index]
+            adv_targ = advantages[index]
+            target_pcs = self.target_pcs[index]
+            
+            yield obs, action, value_pred, ret, old_action_log_prob, adv_targ, target_pcs
+    
+    def clear(self):
+        super().clear()
+        self.target_pcs = []
+    
+    def insert(self, obs, action, action_log_prob, value_pred, unit_id=0, reward=0, target_pcs=None):
+        self.obs.append(obs)
+        self.actions.append(action)
+        self.action_log_probs.append(action_log_prob)
+        self.value_preds.append(value_pred)
+        self.rewards.append(reward)
+        self.unit_ids.append(unit_id)
+        if target_pcs is None:
+            self.target_pcs.append([])
+        else:
+            self.target_pcs.append(target_pcs)
+    
+    def add_target_pc(self, target_pc):
+        self.target_pcs[-1].append(target_pc)
 
 class RolloutStorage(object):
     def __init__(self, num_steps, num_processes, obs_shape, action_space,
